@@ -102,3 +102,9 @@ build.bat               # Windows binary → .build/windows.exe
 ```
 
 Releases are built by GitHub Actions on `v*` tags (linux amd64 + arm64).
+
+ตรวจสอบเวอร์ชันที่ติดตั้ง:
+
+```bash
+/opt/worker-prewarm/worker-prewarm --version
+```

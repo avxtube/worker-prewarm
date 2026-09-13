@@ -141,7 +141,8 @@ fi
 print_status "Downloading binary ($BINARY) from latest release..."
 curl -fsSL "$RELEASES_URL/$BINARY" -o "$APP_DIR/$APP_NAME"
 chmod +x "$APP_DIR/$APP_NAME"
-print_status "Binary downloaded."
+INSTALLED_VERSION=$("$APP_DIR/$APP_NAME" --version)
+print_status "Binary downloaded: $INSTALLED_VERSION"
 
 # ─── Create .env ─────────────────────────────────────────────
 # ⚠ อัพเดตอย่างเดียว (ไม่ใส่ --database-url) → คงค่า .env เดิมไว้
@@ -217,6 +218,7 @@ fi
 echo "============================================"
 echo ""
 echo "  Directory:  $APP_DIR"
+echo "  Version:    $INSTALLED_VERSION"
 echo "  Workers:    $RUNNING / $WORKER_COUNT running"
 echo ""
 echo "  Commands:"

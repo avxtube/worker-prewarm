@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -20,6 +21,11 @@ import (
 var version = "dev"
 
 func main() {
+	if wantsVersion(os.Args[1:]) {
+		fmt.Printf("worker-prewarm %s\n", version)
+		return
+	}
+
 	config.Load()
 	workerID := utils.GenerateWorkerID()
 	log.Printf("🚀 Starting Worker Prewarm %s [Worker: %s]", version, workerID)
@@ -74,5 +80,17 @@ func main() {
 	case <-hbDone:
 	case <-time.After(10 * time.Second):
 		log.Println("⚠️ Heartbeat shutdown timed out")
+	}
+}
+
+func wantsVersion(args []string) bool {
+	if len(args) != 1 {
+		return false
+	}
+	switch args[0] {
+	case "--version", "-version", "version":
+		return true
+	default:
+		return false
 	}
 }
