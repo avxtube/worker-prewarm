@@ -62,29 +62,29 @@ func RunLoop(ctx context.Context, workerID string, handler JobHandler) {
 
 		// ── ช่อง new ──────────────────────────────────────────
 		if cfg.Enabled && atomic.LoadInt64(&activeNew) < int64(cfg.MaxNew) {
-			if job := tryClaim(ctx, workerID, "new"); job != nil {
+			if claimedJob := tryClaim(ctx, workerID, "new"); claimedJob != nil {
 				claimed = true
 				atomic.AddInt64(&activeNew, 1)
 				wg.Add(1)
-				go func(j *models.PrewarmQueue) {
+				go func(claimed *circuitClaim) {
 					defer wg.Done()
 					defer atomic.AddInt64(&activeNew, -1)
-					runJob(ctx, j, handler)
-				}(job)
+					runJob(ctx, claimed.job, claimed.lease, handler)
+				}(claimedJob)
 			}
 		}
 
 		// ── ช่อง reprewarm (อิสระจาก new) ─────────────────────
 		if cfg.EnabledOld && atomic.LoadInt64(&activeOld) < int64(cfg.MaxOld) {
-			if job := tryClaim(ctx, workerID, "reprewarm"); job != nil {
+			if claimedJob := tryClaim(ctx, workerID, "reprewarm"); claimedJob != nil {
 				claimed = true
 				atomic.AddInt64(&activeOld, 1)
 				wg.Add(1)
-				go func(j *models.PrewarmQueue) {
+				go func(claimed *circuitClaim) {
 					defer wg.Done()
 					defer atomic.AddInt64(&activeOld, -1)
-					runJob(ctx, j, handler)
-				}(job)
+					runJob(ctx, claimed.job, claimed.lease, handler)
+				}(claimedJob)
 			}
 		}
 
@@ -107,21 +107,51 @@ func RunLoop(ctx context.Context, workerID string, handler JobHandler) {
 	log.Println("🔁 Job loop stopped")
 }
 
-// tryClaim claims one job of the given kind; log แล้วคืน nil เมื่อพลาด
-func tryClaim(ctx context.Context, workerID, kind string) *models.PrewarmQueue {
-	job, err := Claim(ctx, workerID, kind)
+type circuitClaim struct {
+	job   *models.PrewarmQueue
+	lease storageCircuitLease
+}
+
+// tryClaim leaves jobs belonging to an open storage circuit untouched in the
+// pending queue. begin also reserves exactly one half-open probe after cooldown.
+func tryClaim(ctx context.Context, workerID, kind string) *circuitClaim {
+	now := time.Now()
+	job, err := Claim(ctx, workerID, kind, prewarmStorageCircuit.blockedStorageIDs(now)...)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Printf("⚠️ Claim(%s) failed: %v", kind, err)
 		}
 		return nil
 	}
-	return job
+	if job == nil {
+		return nil
+	}
+	lease := prewarmStorageCircuit.begin(storageIDForJob(job), now)
+	if !lease.allowed {
+		// The circuit may have opened between building the Mongo filter and the
+		// atomic claim. Put the job back without changing retryCount.
+		if releaseErr := Release(ctx, job.ID); releaseErr != nil && ctx.Err() == nil {
+			log.Printf("⚠️ Release blocked storage job %s failed: %v", job.ID, releaseErr)
+		}
+		return nil
+	}
+	if lease.probe {
+		log.Printf("▶️ Storage %s cooldown ended; running probe job %s", lease.storageID, job.ID)
+	}
+	return &circuitClaim{job: job, lease: lease}
 }
 
 // runJob executes one job and settles its final status.
-func runJob(ctx context.Context, job *models.PrewarmQueue, handler JobHandler) {
+func runJob(ctx context.Context, job *models.PrewarmQueue, lease storageCircuitLease, handler JobHandler) {
 	err := handler(ctx, job)
+	now := time.Now()
+	outcome := circuitNeutral
+	if err == nil {
+		outcome = circuitSuccess
+	} else if errors.Is(err, ErrStorageFailure) {
+		outcome = circuitFailure
+	}
+	openUntil := prewarmStorageCircuit.finish(lease, outcome, now)
 
 	// settle ด้วย ctx ใหม่เสมอ — ตอน shutdown ctx หลักถูก cancel ไปแล้ว
 	// แต่เรายังต้องเขียนสถานะปิดงานให้สำเร็จ
@@ -132,6 +162,9 @@ func runJob(ctx context.Context, job *models.PrewarmQueue, handler JobHandler) {
 	case err == nil:
 		if e := Complete(settleCtx, job.ID); e != nil {
 			log.Printf("⚠️ Complete failed for job %s: %v", job.ID, e)
+		}
+		if lease.probe {
+			log.Printf("▶️ Storage %s probe succeeded; prewarm resumed", lease.storageID)
 		}
 
 	case ctx.Err() != nil || errors.Is(err, context.Canceled):
@@ -154,6 +187,25 @@ func runJob(ctx context.Context, job *models.PrewarmQueue, handler JobHandler) {
 		}
 		log.Printf("🔄 Job %s retrying (+%s): %v", job.ID, requeueDelay, err)
 
+	case errors.Is(err, ErrStorageFailure):
+		delay := requeueDelay
+		if remaining := time.Until(openUntil); remaining > delay {
+			delay = remaining
+		}
+		if !openUntil.IsZero() && lease.storageID != "" {
+			if e := deferPendingStorageJobs(settleCtx, lease.storageID, job.Pop, openUntil); e != nil {
+				log.Printf("⚠️ Defer pending jobs for storage %s failed: %v", lease.storageID, e)
+			}
+		}
+		if e := ReleaseWithDelay(settleCtx, job.ID, delay); e != nil {
+			log.Printf("⚠️ Release failed for storage job %s: %v", job.ID, e)
+		}
+		if !openUntil.IsZero() {
+			log.Printf("⏸️ Storage %s paused until %s after %d failures above 50%% within %s",
+				lease.storageID, openUntil.Format(time.RFC3339), storageFailureThreshold, storageFailureWindow)
+		}
+		log.Printf("↩️ Job %s kept pending (+%s), prewarm result not recorded: %v", job.ID, delay.Round(time.Second), err)
+
 	default:
 		// ไม่ retry ในคิว — ทิ้งงานไปเลย เพราะ enqueuer ตรวจทุกนาทีอยู่แล้ว
 		// media ที่ยังไม่มีผล warm จะถูกจัดเข้าคิวใหม่เอง ส่วนตัวที่บันทึกผล
@@ -165,6 +217,24 @@ func runJob(ctx context.Context, job *models.PrewarmQueue, handler JobHandler) {
 		}
 		log.Printf("❌ Job %s dropped (จะกลับมาตามรอบ enqueue ใหม่): %v", job.ID, err)
 	}
+}
+
+// deferPendingStorageJobs persists the cooldown on existing queue documents.
+// This prevents an immediate retry after a worker restart and makes sibling
+// workers skip the same storage until the cooldown expires.
+func deferPendingStorageJobs(ctx context.Context, storageID, pop string, until time.Time) error {
+	filter := bson.M{
+		"status": "pending",
+		"pop":    pop,
+		"$or": []bson.M{
+			{"storageId": storageID},
+			{"targetStorageId": storageID},
+		},
+	}
+	_, err := models.PrewarmQueueModel.Col().UpdateMany(ctx, filter, bson.M{
+		"$max": bson.M{"nextRetryAt": until},
+	})
+	return err
 }
 
 // releaseOwn คืนงาน processing ทั้งหมดของ worker นี้กลับเป็น pending

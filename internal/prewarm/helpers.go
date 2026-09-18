@@ -131,28 +131,6 @@ func prewarmParallel(ctx context.Context, kind string) int {
 	return def
 }
 
-// maxFailPercent อ่าน prewarm.max_fail_percent (default 10)
-// ยังไม่ได้ใช้ตัดสินอะไรตอนนี้ (ล้มเท่าไหร่ก็บันทึกผลไปเลย ไม่ retry)
-// เก็บไว้เผื่อวันหลังอยากมีเกณฑ์ เช่น "ล้มเกิน x% ไม่ต้องนับเป็น warm สำเร็จ"
-//
-//nolint:unused // เก็บไว้ใช้ภายหลัง
-func maxFailPercent(ctx context.Context) int {
-	setting := getSetting(ctx, enums.SettingPrewarm)
-	if setting == nil {
-		return 10
-	}
-	cfg, ok := asBsonM(setting.Value)
-	if !ok {
-		return 10
-	}
-	if v, exists := cfg["max_fail_percent"]; exists {
-		if n := toInt(v); n > 0 {
-			return n
-		}
-	}
-	return 10
-}
-
 // asBsonM แปลงค่า interface{} ที่อาจ decode มาเป็น bson.M / map / bson.D
 // (default registry decode document เป็น bson.D — เจอมาแล้วกับ kill switch)
 func asBsonM(v interface{}) (bson.M, bool) {

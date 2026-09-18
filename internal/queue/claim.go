@@ -26,7 +26,7 @@ import (
 // Claim atomically claims the next pending prewarm job of the given kind
 // ("new" | "reprewarm") for this worker — loop เรียกแยกช่องตาม slot ว่าง.
 // Returns (nil, nil) when the queue is empty.
-func Claim(ctx context.Context, workerID, kind string) (*models.PrewarmQueue, error) {
+func Claim(ctx context.Context, workerID, kind string, excludedStorageIDs ...string) (*models.PrewarmQueue, error) {
 	now := time.Now()
 	filter := bson.M{
 		"pop":    config.AppConfig.Pop,
@@ -37,6 +37,12 @@ func Claim(ctx context.Context, workerID, kind string) (*models.PrewarmQueue, er
 			{"nextRetryAt": bson.M{"$exists": false}},
 			{"nextRetryAt": bson.M{"$lte": now}},
 		},
+	}
+	if len(excludedStorageIDs) > 0 {
+		filter["$nor"] = []bson.M{
+			{"storageId": bson.M{"$in": excludedStorageIDs}},
+			{"targetStorageId": bson.M{"$in": excludedStorageIDs}},
+		}
 	}
 	// งาน new เท่านั้นที่ผูก storage ได้ (reprewarm ไม่ประทับ target — ใครก็หยิบได้)
 	if kind == "new" {
@@ -87,8 +93,12 @@ var ErrJobRequeue = errors.New("job requeue")
 // number of attempts instead of keeping a broken media in the queue forever.
 var ErrJobRetry = errors.New("job retry")
 
-// Playlist readiness errors use a bounded retry count. Other failures are
-// recorded and removed so they can return through the normal reprewarm cycle.
+// ErrStorageFailure means more than half of the URLs in a prewarm job failed.
+// The job stays pending without recording media.prewarm or consuming retries.
+var ErrStorageFailure = errors.New("storage prewarm failure")
+
+// Playlist readiness errors use a bounded retry count. Storage failures remain
+// pending and are governed by the per-storage circuit breaker.
 
 // Release returns a claimed job to the queue (processing → pending),
 // clearing ownership. Called on graceful shutdown.

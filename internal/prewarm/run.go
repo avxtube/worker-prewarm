@@ -89,8 +89,7 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 			if attempt < maxPlaylistAttempts {
 				return fmt.Errorf("sprite.vtt not ready (attempt %d/%d): %w", attempt, maxPlaylistAttempts, queue.ErrJobRetry)
 			}
-			log.Printf("⚠️ [%s@%s] sprite.vtt not reachable after %d attempts — recorded as failed", label, pop, attempt)
-			return recordPrewarm(ctx, job.MediaID, pop, WarmStats{Total: 1, Failed: 1})
+			return fmt.Errorf("sprite.vtt not reachable after %d attempts: %w", attempt, queue.ErrStorageFailure)
 		}
 	} else {
 		if domainPlaylist == "" {
@@ -101,7 +100,11 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 			return err
 		}
 		childURL := fmt.Sprintf("%s/%s/%s", domainPlaylist, mediaSlug, playlistName)
-		collected, err := engine.CollectPlaylistURLs(ctx, childURL)
+		var segmentExtensions []string
+		if mediaType == enums.MediaTypeVideo {
+			segmentExtensions = []string{".ts", ".mp4", ".m4s", ".jpeg"}
+		}
+		collected, err := engine.CollectPlaylistURLs(ctx, childURL, segmentExtensions...)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -110,8 +113,7 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 			if attempt < maxPlaylistAttempts {
 				return fmt.Errorf("playlist not ready (attempt %d/%d): %v: %w", attempt, maxPlaylistAttempts, err, queue.ErrJobRetry)
 			}
-			log.Printf("⚠️ [%s@%s] playlist not reachable after %d attempts — recorded as failed: %v", label, pop, attempt, err)
-			return recordPrewarm(ctx, job.MediaID, pop, WarmStats{Total: 1, Failed: 1})
+			return fmt.Errorf("playlist not reachable after %d attempts: %v: %w", attempt, err, queue.ErrStorageFailure)
 		}
 
 		// งานคือ media ตัวนี้ตัวเดียว (1 job = 1 rendition) — ไม่แตะ master
@@ -180,9 +182,15 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 	}
 
 	took := time.Since(start)
-	log.Printf("✅ [%s@%s] Warmed %d URLs (HIT:%d MISS:%d EXPIRED:%d FAILED:%d) in %s",
-		label, pop, stats.Total, stats.Hit, stats.Miss, stats.Expired, stats.Failed,
-		took.Round(time.Millisecond))
+	failPct := failedPercent(stats)
+	if failPct > 50 {
+		log.Printf("⚠️ [%s@%s] Warm failed %d/%d URLs (%.0f%%) in %s",
+			label, pop, stats.Failed, stats.Total, failPct, took.Round(time.Millisecond))
+	} else {
+		log.Printf("✅ [%s@%s] Warmed %d URLs (HIT:%d MISS:%d EXPIRED:%d FAILED:%d) in %s",
+			label, pop, stats.Total, stats.Hit, stats.Miss, stats.Expired, stats.Failed,
+			took.Round(time.Millisecond))
+	}
 
 	// เขียนรายการ URL ของ media นี้ลงไฟล์ — ทำหลัง warm จบ ก่อนตัดสินผล
 	// เพื่อให้งานที่ fail เกินเกณฑ์ก็ยังมีรายการไว้ไล่ดูว่าพังตรงไหน
@@ -193,22 +201,22 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 		}, outcomes, stats)
 	}
 
-	// หลัง collect playlist สำเร็จ ให้บันทึกผล warm เสมอ ไม่ว่าจะมี segment
-	// fail กี่เปอร์เซ็นต์; bounded retry ใช้เฉพาะ playlist/VTT ที่ยังอ่านไม่ได้
-	//
-	// เหตุผล: งานที่คา nextRetryAt กินโควตาต่อ storage ของ enqueuer ทั้งที่
-	// ยังไม่ได้ใช้แบนด์วิดท์อะไรเลย และถ้า worker ของ targetStorageId ดับ
-	// งานจะไม่มีใคร claim → retryCount ไม่เพิ่ม → ค้างกินโควตาถาวร
-	//
-	// พังแล้วบันทึกไปเลยแทน: prewarmAt ถูกตั้งเป็นตอนนี้ media จึงไปเข้าคิว
-	// ใหม่เองผ่านช่อง reprewarm เมื่อครบ reprewarm_age_minutes
-	if stats.Failed > 0 {
-		failPct := float64(stats.Failed) / float64(stats.Total) * 100
-		log.Printf("⚠️ [%s@%s] failed %d/%d urls (%.0f%%) — recorded, will retry via reprewarm",
-			label, pop, stats.Failed, stats.Total, failPct)
+	// A result with more than half its URLs failed is not a completed prewarm.
+	// Keep the queue document pending and do not advance media.prewarmAt. The
+	// queue-level circuit breaker pauses this storage after five such results.
+	if failPct > 50 {
+		return fmt.Errorf("[%s@%s] failed %d/%d urls (%.0f%%): %w",
+			label, pop, stats.Failed, stats.Total, failPct, queue.ErrStorageFailure)
 	}
 
 	return recordPrewarm(ctx, job.MediaID, pop, stats)
+}
+
+func failedPercent(stats WarmStats) float64 {
+	if stats.Total <= 0 {
+		return 0
+	}
+	return float64(stats.Failed) / float64(stats.Total) * 100
 }
 
 func playlistNameForMediaType(mediaType string) (string, error) {

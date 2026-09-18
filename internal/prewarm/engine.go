@@ -100,7 +100,7 @@ func (e *Engine) fetchContent(ctx context.Context, url string) (string, error) {
 
 // CollectPlaylistURLs ไล่จาก video/audio playlist → child playlist → segment
 // คืนทุก URL ที่ต้อง warm (รวม master เอง)
-func (e *Engine) CollectPlaylistURLs(ctx context.Context, masterURL string) ([]string, error) {
+func (e *Engine) CollectPlaylistURLs(ctx context.Context, masterURL string, segmentExtensions ...string) ([]string, error) {
 	urlSet := map[string]bool{masterURL: true}
 
 	masterContent, err := e.fetchContent(ctx, masterURL)
@@ -115,7 +115,7 @@ func (e *Engine) CollectPlaylistURLs(ctx context.Context, masterURL string) ([]s
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if strings.HasSuffix(line, ".m3u8") || strings.Contains(line, ".m3u8?") {
+		if hasReferenceExtension(line, ".m3u8") {
 			childPlaylists = append(childPlaylists, line)
 		}
 	}
@@ -134,13 +134,13 @@ func (e *Engine) CollectPlaylistURLs(ctx context.Context, masterURL string) ([]s
 				continue // child เดียวพัง — ยัง warm ตัวอื่นต่อได้
 			}
 			childBase := childURL[:strings.LastIndex(childURL, "/")+1]
-			for _, seg := range parseSegments(childContent) {
+			for _, seg := range parseSegments(childContent, segmentExtensions...) {
 				urlSet[buildURL(seg, childBase)] = true
 			}
 		}
 	} else {
 		// playlist เดี่ยว (มี segment ตรงๆ)
-		for _, seg := range parseSegments(masterContent) {
+		for _, seg := range parseSegments(masterContent, segmentExtensions...) {
 			urlSet[buildURL(seg, baseURL)] = true
 		}
 	}
@@ -261,17 +261,19 @@ func (e *Engine) headRequest(ctx context.Context, url string) URLOutcome {
 
 // ─── Parsers ─────────────────────────────────────────────────
 
-// parseSegments ดึงชื่อ segment จากเนื้อ m3u8 (.ts / .jpeg / URL เต็ม)
-func parseSegments(content string) []string {
+// parseSegments ดึงเฉพาะ segment ที่ระบบ prewarm รองรับ
+func parseSegments(content string, extensions ...string) []string {
 	var segments []string
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if strings.HasSuffix(line, ".ts") || strings.HasSuffix(line, ".jpeg") ||
-			strings.HasSuffix(line, ".mp4") || strings.HasSuffix(line, ".m4s") ||
-			strings.HasPrefix(line, "http") || strings.HasPrefix(line, "//") {
+		if len(extensions) == 0 && !hasReferenceExtension(line, ".m3u8") {
+			segments = append(segments, line)
+			continue
+		}
+		if hasReferenceExtension(line, extensions...) {
 			segments = append(segments, line)
 		}
 	}
@@ -288,19 +290,45 @@ func parseVTTImages(content string) []string {
 			strings.Contains(line, "-->") {
 			continue
 		}
-		if strings.Contains(line, ".jpg") || strings.Contains(line, ".jpeg") || strings.Contains(line, ".png") {
-			part := line
-			if idx := strings.Index(line, "#"); idx >= 0 {
-				part = line[:idx]
-			}
-			part = strings.TrimSpace(part)
-			if part != "" && !seen[part] {
-				seen[part] = true
-				images = append(images, part)
-			}
+		part := line
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			part = line[:idx]
+		}
+		part = strings.TrimSpace(part)
+		if !isSpriteImageReference(part) {
+			continue
+		}
+		if !seen[part] {
+			seen[part] = true
+			images = append(images, part)
 		}
 	}
 	return images
+}
+
+func hasReferenceExtension(reference string, extensions ...string) bool {
+	path := strings.ToLower(strings.TrimSpace(reference))
+	if idx := strings.IndexAny(path, "?#"); idx >= 0 {
+		path = path[:idx]
+	}
+	for _, extension := range extensions {
+		if strings.HasSuffix(path, extension) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSpriteImageReference(reference string) bool {
+	path := strings.ToLower(strings.TrimSpace(reference))
+	if idx := strings.IndexAny(path, "?#"); idx >= 0 {
+		path = path[:idx]
+	}
+	if idx := strings.LastIndex(path, "/"); idx >= 0 {
+		path = path[idx+1:]
+	}
+	return strings.HasPrefix(path, "sprite-") &&
+		hasReferenceExtension(path, ".jpg", ".jpeg", ".png")
 }
 
 // buildURL ต่อ URL แบบ relative เข้ากับ base (รองรับ absolute / //host / /path)

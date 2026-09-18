@@ -7,6 +7,25 @@ import (
 	"worker-prewarm/internal/db/models"
 )
 
+func TestFailedPercent(t *testing.T) {
+	tests := []struct {
+		name  string
+		stats WarmStats
+		want  float64
+	}{
+		{name: "empty", stats: WarmStats{}, want: 0},
+		{name: "half", stats: WarmStats{Total: 10, Failed: 5}, want: 50},
+		{name: "over half", stats: WarmStats{Total: 10, Failed: 6}, want: 60},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := failedPercent(tt.stats); got != tt.want {
+				t.Fatalf("failedPercent() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPrewarmAttempt(t *testing.T) {
 	if got := prewarmAttempt(&models.PrewarmQueue{}); got != 1 {
 		t.Fatalf("first attempt = %d, want 1", got)
