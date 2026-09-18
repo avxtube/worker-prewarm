@@ -34,8 +34,9 @@ enqueuer (platform/node-api)               worker-prewarm (this repo)
   media ของ storage ตัวเอง (enqueuer ประทับ `targetStorageId` เมื่อ storage
   นั้นมี worker ผูกอยู่) ส่วนงาน **reprewarm** ไม่ประทับ target — worker
   ไหนก็หยิบได้ ไม่ว่ามี storageId หรือไม่
-- playlist/VTT ที่ยังไม่พร้อมจะ retry ทุก 1 นาที; งานที่ URL ล้มเหลวเกิน
-  50% จะไม่บันทึก `media.prewarm` และคงอยู่ในสถานะ pending
+- playlist/VTT ที่ยังไม่พร้อมจะ retry ทุก 1 นาที; เมื่อจำนวน URL ที่ล้มเหลว
+  เกิน 50% ของงาน ระบบจะยกเลิก request ที่เหลือทันที ไม่บันทึก
+  `media.prewarm` และคงงานไว้ในสถานะ pending
 - **Storage circuit breaker** — ถ้า storage เดียวกันมีงานที่ URL ล้มเหลวเกิน
   50% จำนวน 5 ครั้งภายใน 10 นาที จะพักการ claim storage นั้น 10 นาที
   จากนั้นทดลอง 1 งาน; สำเร็จจึงเปิดตามปกติ หากยังล้มเหลวจะพักต่ออีก 10 นาที

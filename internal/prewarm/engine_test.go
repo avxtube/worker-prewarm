@@ -1,9 +1,39 @@
 package prewarm
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"sync/atomic"
 	"testing"
 )
+
+func TestWarmStopsAfterFailuresExceedHalf(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	urls := make([]string, 20)
+	for i := range urls {
+		urls[i] = server.URL
+	}
+	engine := &Engine{client: server.Client(), parallel: 1}
+	stats := engine.Warm(context.Background(), urls, nil)
+
+	if got := requests.Load(); got >= int64(len(urls)) {
+		t.Fatalf("early abort sent all %d requests", got)
+	}
+	if stats.Failed*2 <= stats.Total {
+		t.Fatalf("failure threshold not exceeded: %+v", stats)
+	}
+	if stats.Hit+stats.Miss+stats.Expired+stats.Failed != stats.Total {
+		t.Fatalf("outcome counters do not add up: %+v", stats)
+	}
+}
 
 func TestParseSegmentsAllowsOnlyPrewarmSegmentTypes(t *testing.T) {
 	content := `#EXTM3U

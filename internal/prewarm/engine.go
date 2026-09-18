@@ -187,27 +187,43 @@ type URLOutcome struct {
 func (e *Engine) Warm(ctx context.Context, urls []string, onResult func(o URLOutcome, done, total int64)) WarmStats {
 	stats := WarmStats{Total: int64(len(urls))}
 	var done int64
+	var thresholdExceeded atomic.Bool
+	warmCtx, cancelWarm := context.WithCancel(ctx)
+	defer cancelWarm()
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, e.parallel)
 
+loop:
 	for _, url := range urls {
-		if ctx.Err() != nil {
-			break
+		select {
+		case <-warmCtx.Done():
+			break loop
+		case sem <- struct{}{}:
+			// Cancellation and a free slot can become ready together. Check once
+			// more before starting a request so the producer stops deterministically.
+			if warmCtx.Err() != nil {
+				<-sem
+				break loop
+			}
 		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(u string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			o := e.headRequest(ctx, u)
+			o := e.headRequest(warmCtx, u)
 
 			// นับ stats จากผล
 			switch {
 			case o.Err != nil,
 				o.Status != http.StatusOK && o.Status != http.StatusPartialContent:
-				atomic.AddInt64(&stats.Failed, 1)
+				failed := atomic.AddInt64(&stats.Failed, 1)
+				if failed*2 > stats.Total && thresholdExceeded.CompareAndSwap(false, true) {
+					// More than half the complete URL set has already failed, so no
+					// remaining response can bring the final ratio back to 50% or lower.
+					cancelWarm()
+				}
 			default:
 				switch o.Cache {
 				case "HIT", "REVALIDATED":
@@ -226,6 +242,12 @@ func (e *Engine) Warm(ctx context.Context, urls []string, onResult func(o URLOut
 		}(url)
 	}
 	wg.Wait()
+	if thresholdExceeded.Load() && ctx.Err() == nil {
+		// Requests skipped or cancelled by the early abort were not warmed. Count
+		// them as failed so Total always equals the sum of the outcome counters.
+		succeeded := atomic.LoadInt64(&stats.Hit) + atomic.LoadInt64(&stats.Miss) + atomic.LoadInt64(&stats.Expired)
+		atomic.StoreInt64(&stats.Failed, stats.Total-succeeded)
+	}
 	return stats
 }
 
