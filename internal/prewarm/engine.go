@@ -175,11 +175,13 @@ func (e *Engine) CollectVTTURLs(ctx context.Context, vttURL string) []string {
 
 // URLOutcome คือผลของการ HEAD หนึ่ง URL — ส่งต่อให้ dashboard สตรีมสด
 type URLOutcome struct {
-	URL      string
-	Status   int
-	Cache    string // HIT / MISS / EXPIRED / ... ("" = ไม่มี header)
-	Duration time.Duration
-	Err      error
+	URL       string
+	Status    int
+	Cache     string // HIT / MISS / EXPIRED / ... ("" = ไม่มี header)
+	Size      int64  // Content-Length ของ payload; ใช้ได้เมื่อ SizeKnown เป็น true
+	SizeKnown bool
+	Duration  time.Duration
+	Err       error
 }
 
 // Warm ยิง HEAD ทุก URL (parallel ตาม engine) — onResult ถูกเรียกทุกครั้ง
@@ -274,10 +276,12 @@ func (e *Engine) headRequest(ctx context.Context, url string) URLOutcome {
 		cacheStatus = resp.Header.Get("X-Cache")
 	}
 	return URLOutcome{
-		URL:      url,
-		Status:   resp.StatusCode,
-		Cache:    cacheStatus,
-		Duration: time.Since(start),
+		URL:       url,
+		Status:    resp.StatusCode,
+		Cache:     cacheStatus,
+		Size:      resp.ContentLength,
+		SizeKnown: resp.ContentLength >= 0,
+		Duration:  time.Since(start),
 	}
 }
 

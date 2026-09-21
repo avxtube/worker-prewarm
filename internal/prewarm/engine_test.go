@@ -35,6 +35,28 @@ func TestWarmStopsAfterFailuresExceedHalf(t *testing.T) {
 	}
 }
 
+func TestHeadRequestCapturesContentLength(t *testing.T) {
+	method := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method <- r.Method
+		w.Header().Set("Content-Length", "1234")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	engine := &Engine{client: server.Client(), parallel: 1}
+	outcome := engine.headRequest(context.Background(), server.URL+"/video0.jpeg")
+	if outcome.Err != nil {
+		t.Fatalf("headRequest() error = %v", outcome.Err)
+	}
+	if got := <-method; got != http.MethodHead {
+		t.Fatalf("method = %s, want HEAD", got)
+	}
+	if !outcome.SizeKnown || outcome.Size != 1234 {
+		t.Fatalf("size = %d (known=%v), want 1234", outcome.Size, outcome.SizeKnown)
+	}
+}
+
 func TestParseSegmentsAllowsOnlyPrewarmSegmentTypes(t *testing.T) {
 	content := `#EXTM3U
 video-1.ts

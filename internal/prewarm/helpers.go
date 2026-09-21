@@ -278,23 +278,28 @@ func strVal(p *string) string {
 // และ pop อื่นใช้ prewarm.fra.prewarmAt เป็นเงื่อนไขเริ่มงาน
 // ⚠ ยิงตรงที่ collection — goose FindByIDAndUpdate จะแอบ $set updatedAt
 // ให้เอง ซึ่งเราไม่อยากให้การ warm ไปแตะ updatedAt ของ media
-func recordPrewarm(ctx context.Context, mediaID, pop string, stats WarmStats) error {
+func recordPrewarm(ctx context.Context, mediaID, pop string, stats WarmStats, size *int64) error {
+	set := bson.M{
+		"prewarm." + pop: bson.M{
+			"data": bson.M{
+				"total":   stats.Total,
+				"hit":     stats.Hit,
+				"miss":    stats.Miss,
+				"expired": stats.Expired,
+				"failed":  stats.Failed,
+			},
+			"prewarmAt": time.Now(),
+		},
+	}
+	// รักษาค่าเดิมไว้หาก upstream ไม่ส่ง Content-Length ครบทุก payload
+	// เพื่อไม่ให้เขียนขนาดที่เป็นเพียงผลรวมบางส่วนทับค่าที่ถูกต้อง
+	if size != nil {
+		set["size"] = *size
+	}
+
 	_, err := models.MediaModel.Col().UpdateOne(ctx,
 		bson.M{"_id": mediaID},
-		bson.M{
-			"$set": bson.M{
-				"prewarm." + pop: bson.M{
-					"data": bson.M{
-						"total":   stats.Total,
-						"hit":     stats.Hit,
-						"miss":    stats.Miss,
-						"expired": stats.Expired,
-						"failed":  stats.Failed,
-					},
-					"prewarmAt": time.Now(),
-				},
-			},
-		},
+		bson.M{"$set": set},
 	)
 	if err != nil && errors.Is(err, mongo.ErrNoDocuments) {
 		return nil // media หายไประหว่าง warm — ไม่เป็นไร

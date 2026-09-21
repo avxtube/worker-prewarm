@@ -28,6 +28,20 @@ func TestFailedPercent(t *testing.T) {
 	}
 }
 
+func TestCountPayloadURLsExcludesManifests(t *testing.T) {
+	urls := []string{
+		"https://cdn.example/video.m3u8",
+		"https://cdn.example/child.m3u8?token=1",
+		"https://cdn.example/video0.jpeg",
+		"https://cdn.example/video1.ts?token=1",
+		"https://cdn.example/sprite.vtt",
+		"https://cdn.example/sprite-0.jpg",
+	}
+	if got := countPayloadURLs(urls); got != 3 {
+		t.Fatalf("countPayloadURLs() = %d, want 3", got)
+	}
+}
+
 func TestPersistentPlaylistFailureDropsOrphansWithoutOpeningStorageCircuit(t *testing.T) {
 	err := classifyPersistentPlaylistFailure("playlist unavailable", false, nil)
 	if errors.Is(err, queue.ErrStorageFailure) || errors.Is(err, queue.ErrJobRequeue) {

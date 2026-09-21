@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"path"
@@ -154,7 +156,18 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 		outcomes = make([]URLOutcome, 0, len(urls))
 	}
 
+	// จำนวน payload ที่ต้องได้ขนาดครบจริง ๆ คำนวณจาก URL ทั้งชุดก่อนยิง
+	// เพื่อไม่ให้ early abort ทำให้ยอดบางส่วนถูกเข้าใจผิดว่าเป็นยอดครบแล้ว
+	expectedPayloads := countPayloadURLs(urls)
+	var sizedPayloads atomic.Int64
+	var payloadBytes atomic.Int64
+
 	stats := engine.Warm(ctx, urls, func(o URLOutcome, done, total int64) {
+		if isPayloadURL(o.URL) && o.Err == nil &&
+			(o.Status == http.StatusOK || o.Status == http.StatusPartialContent) && o.SizeKnown {
+			sizedPayloads.Add(1)
+			payloadBytes.Add(o.Size)
+		}
 		if collect {
 			outMu.Lock()
 			outcomes = append(outcomes, o)
@@ -209,7 +222,28 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 			label, pop, stats.Failed, stats.Total, failPct, queue.ErrStorageFailure)
 	}
 
-	return recordPrewarm(ctx, job.MediaID, pop, stats)
+	var mediaSize *int64
+	if expectedPayloads > 0 && sizedPayloads.Load() == expectedPayloads {
+		size := payloadBytes.Load()
+		mediaSize = &size
+	}
+	return recordPrewarm(ctx, job.MediaID, pop, stats, mediaSize)
+}
+
+// isPayloadURL แยกไฟล์ข้อมูลจริงออกจาก manifest เพื่อให้ media.size หมายถึง
+// ขนาด segment/sprite รวม ไม่รวมไฟล์ควบคุม .m3u8 และ .vtt
+func isPayloadURL(rawURL string) bool {
+	return !hasReferenceExtension(rawURL, ".m3u8", ".vtt")
+}
+
+func countPayloadURLs(urls []string) int64 {
+	var total int64
+	for _, rawURL := range urls {
+		if isPayloadURL(rawURL) {
+			total++
+		}
+	}
+	return total
 }
 
 func persistentPlaylistFailure(ctx context.Context, job *models.PrewarmQueue, message string) error {
