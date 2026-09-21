@@ -238,6 +238,34 @@ func resolveJobMetaFromDB(ctx context.Context, job *models.PrewarmQueue, meta *J
 	return meta, nil
 }
 
+// jobSourceIsPlayable is used only after repeated playlist failures. Normal
+// jobs retain the queue-only fast path, while stale queue documents are
+// verified before they can trip the per-storage circuit breaker.
+func jobSourceIsPlayable(ctx context.Context, mediaID string) (bool, error) {
+	media, err := models.MediaModel.FindByID(ctx, mediaID)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return false, nil
+		}
+		return false, err
+	}
+	if media.DeletedAt != nil || media.FileID == "" {
+		return false, nil
+	}
+
+	file, err := models.FileModel.FindByID(ctx, media.FileID)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return false, nil
+		}
+		return false, err
+	}
+	if file.Metadata != nil && (file.Metadata.DeletedAt != nil || file.Metadata.TrashedAt != nil) {
+		return false, nil
+	}
+	return file.Status == enums.FileStatusReady || file.Status == enums.FileStatusReadyOriginal, nil
+}
+
 func strVal(p *string) string {
 	if p == nil {
 		return ""

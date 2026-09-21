@@ -1,10 +1,12 @@
 package prewarm
 
 import (
+	"errors"
 	"testing"
 
 	"worker-prewarm/internal/core/enums"
 	"worker-prewarm/internal/db/models"
+	"worker-prewarm/internal/queue"
 )
 
 func TestFailedPercent(t *testing.T) {
@@ -23,6 +25,24 @@ func TestFailedPercent(t *testing.T) {
 				t.Fatalf("failedPercent() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPersistentPlaylistFailureDropsOrphansWithoutOpeningStorageCircuit(t *testing.T) {
+	err := classifyPersistentPlaylistFailure("playlist unavailable", false, nil)
+	if errors.Is(err, queue.ErrStorageFailure) || errors.Is(err, queue.ErrJobRequeue) {
+		t.Fatalf("orphan error must be terminal, got %v", err)
+	}
+
+	err = classifyPersistentPlaylistFailure("playlist unavailable", true, nil)
+	if !errors.Is(err, queue.ErrStorageFailure) {
+		t.Fatalf("playable source must report storage failure, got %v", err)
+	}
+
+	verifyErr := errors.New("database unavailable")
+	err = classifyPersistentPlaylistFailure("playlist unavailable", false, verifyErr)
+	if !errors.Is(err, queue.ErrJobRequeue) {
+		t.Fatalf("verification failure must requeue, got %v", err)
 	}
 }
 

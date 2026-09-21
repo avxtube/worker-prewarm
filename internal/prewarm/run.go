@@ -89,7 +89,7 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 			if attempt < maxPlaylistAttempts {
 				return fmt.Errorf("sprite.vtt not ready (attempt %d/%d): %w", attempt, maxPlaylistAttempts, queue.ErrJobRetry)
 			}
-			return fmt.Errorf("sprite.vtt not reachable after %d attempts: %w", attempt, queue.ErrStorageFailure)
+			return persistentPlaylistFailure(ctx, job, fmt.Sprintf("sprite.vtt not reachable after %d attempts", attempt))
 		}
 	} else {
 		if domainPlaylist == "" {
@@ -113,7 +113,7 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 			if attempt < maxPlaylistAttempts {
 				return fmt.Errorf("playlist not ready (attempt %d/%d): %v: %w", attempt, maxPlaylistAttempts, err, queue.ErrJobRetry)
 			}
-			return fmt.Errorf("playlist not reachable after %d attempts: %v: %w", attempt, err, queue.ErrStorageFailure)
+			return persistentPlaylistFailure(ctx, job, fmt.Sprintf("playlist not reachable after %d attempts: %v", attempt, err))
 		}
 
 		// งานคือ media ตัวนี้ตัวเดียว (1 job = 1 rendition) — ไม่แตะ master
@@ -210,6 +210,23 @@ func Run(ctx context.Context, job *models.PrewarmQueue) error {
 	}
 
 	return recordPrewarm(ctx, job.MediaID, pop, stats)
+}
+
+func persistentPlaylistFailure(ctx context.Context, job *models.PrewarmQueue, message string) error {
+	playable, err := jobSourceIsPlayable(ctx, job.MediaID)
+	return classifyPersistentPlaylistFailure(message, playable, err)
+}
+
+func classifyPersistentPlaylistFailure(message string, playable bool, verifyErr error) error {
+	if verifyErr != nil {
+		return fmt.Errorf("%s; source verification failed: %v: %w", message, verifyErr, queue.ErrJobRequeue)
+	}
+	if !playable {
+		// A plain error is intentionally terminal. The queue loop drops this
+		// orphan instead of opening the storage circuit for unrelated media.
+		return fmt.Errorf("%s; source media or file no longer exists", message)
+	}
+	return fmt.Errorf("%s: %w", message, queue.ErrStorageFailure)
 }
 
 func failedPercent(stats WarmStats) float64 {
